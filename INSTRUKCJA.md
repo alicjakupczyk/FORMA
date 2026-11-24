@@ -73,9 +73,13 @@ Od teraz nikt poza Tobą nie założy konta w Twojej aplikacji.
 
 ## Jak wgrać nową wersję (gdy coś zmienimy)
 
-1. Na GitHubie wejdź w repozytorium `forma` → **Add file** → **Upload files**.
+1. Na GitHubie wejdź w repozytorium `FORMA` → **Add file** → **Upload files**.
 2. Przeciągnij zmienione pliki (albo całą zawartość folderu jeszcze raz) → **Commit changes**.
 3. Po 1–2 minutach nowa wersja będzie dostępna. Na iPhonie zamknij i otwórz aplikację.
+
+### Aktualizacja 1 – cel wagowy i Postępy
+1. **Najpierw** Supabase → **SQL Editor** → **New query** → wklej zawartość pliku `supabase/aktualizacja-1.sql` → **Run**.
+2. **Potem** wgraj na GitHub całą zawartość folderu jeszcze raz (pliki się podmienią).
 
 ## Gdy coś nie działa
 

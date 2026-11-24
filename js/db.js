@@ -73,7 +73,14 @@ export const db = {
   async logWeight(date, kg) {
     ok(await supabase.from('weight_log').upsert({ user_id: await uid(), date, weight_kg: kg }));
   },
-  async weightHistory() {
-    return ok(await supabase.from('weight_log').select('*').order('date', { ascending: false }).limit(10));
+  async weightAll() {
+    return ok(await supabase.from('weight_log').select('date,weight_kg').order('date'));
+  },
+  async lastWeight() {
+    const rows = ok(await supabase.from('weight_log').select('date,weight_kg').order('date', { ascending: false }).limit(1));
+    return rows[0] || null;
+  },
+  async deleteWeight(date) {
+    ok(await supabase.from('weight_log').delete().eq('date', date));
   },
 };

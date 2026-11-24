@@ -6,11 +6,13 @@ import { LIFESTYLES, GOALS, MEALS, computeTargets, sum, budget, weeklyCheck, r0,
 import { ACTIVITIES, QUICK_ACTS, activityKcal } from './activities.js';
 import { openAddMeal, openEditEntry, renderBase, macroLine, f1 } from './meals.js';
 import { getKey, setKey, getModel, setModel, DEFAULT_MODEL } from './gemini.js';
-import { $, $$, esc, num, todayStr, addDays, fmtLong, fmtShort, pad, toast, openSheet, closeSheet } from './ui.js';
+import { $, $$, esc, num, todayStr, addDays, fmtLong, pad, toast, openSheet, closeSheet } from './ui.js';
+import { renderProgress, goalWeightFields, bindGoalWeight, validateTarget, forecastText, daysBetween, PACE } from './progress.js';
 
 const main = () => $('#app');
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
-const PROFILE_COLS = ['sex', 'age', 'height_cm', 'weight_kg', 'lifestyle', 'goal', 'kcal_target', 'protein_g', 'carbs_g', 'fat_g', 'fiber_g', 'targets_manual'];
+const PROFILE_COLS = ['sex', 'age', 'height_cm', 'weight_kg', 'lifestyle', 'goal', 'kcal_target', 'protein_g', 'carbs_g', 'fat_g', 'fiber_g', 'targets_manual',
+  'target_weight_kg', 'plan_start_date', 'plan_start_weight'];
 const profileCols = p => Object.fromEntries(PROFILE_COLS.filter(k => p[k] !== undefined).map(k => [k, p[k]]));
 const targetsOnly = t => ({ kcal_target: t.kcal_target, protein_g: t.protein_g, carbs_g: t.carbs_g, fat_g: t.fat_g, fiber_g: t.fiber_g });
 
@@ -27,7 +29,7 @@ function go(tab, keepScroll = false) {
   el.onclick = null;
   el.oninput = null;
   if (!keepScroll) window.scrollTo(0, 0);
-  const render = { day: renderDay, cal: renderCalendar, base: () => renderBase(el), profile: renderProfile }[tab];
+  const render = { day: renderDay, cal: renderCalendar, progress: () => renderProgress(el), base: () => renderBase(el), profile: renderProfile }[tab];
   safe(render)();
 }
 app.go = go;
@@ -163,12 +165,28 @@ function renderOnboarding() {
       <h1>Jaki masz cel?</h1><p class="muted">Możesz go później zmienić w Profilu.</p>
       <form id="onb" class="card">
         ${GOALS.map(g => radioCard('goal', g.id, g.label, g.desc, p.goal)).join('')}
+        <div id="gw" class="field"><span>Twój cel wagowy <small class="muted">(możesz pominąć i ustawić później)</small></span>${goalWeightFields(p)}</div>
         <button class="btn primary big" type="submit">Dalej</button>
         <button class="btn" type="button" data-k="back">Wstecz</button>
       </form></div>`;
-    $('#onb').onsubmit = e => {
+    const form = $('#onb'), gw = $('#gw');
+    const curGoal = () => new FormData(form).get('goal') || 'cut';
+    const toggle = () => {
+      const g = curGoal();
+      if (g !== p.goal) { p.goal = g; gw.innerHTML = `<span>Twój cel wagowy <small class="muted">(możesz pominąć i ustawić później)</small></span>${goalWeightFields({ ...p, target_weight_kg: null })}`; bindGoalWeight(gw, () => p); }
+      gw.hidden = !PACE[g];
+    };
+    bindGoalWeight(gw, () => p);
+    form.onchange = e => { if (e.target.name === 'goal') toggle(); };
+    gw.hidden = !PACE[p.goal];
+    form.onsubmit = e => {
       e.preventDefault();
-      p.goal = new FormData(e.target).get('goal') || 'cut';
+      p.goal = curGoal();
+      if (PACE[p.goal]) {
+        const [tv, err] = validateTarget(p, $('[data-g=target]', gw).value);
+        if (err) return toast(err, 'err');
+        p.target_weight_kg = tv;
+      } else p.target_weight_kg = null;
       o.step = 3;
       renderOnboarding();
     };
@@ -187,6 +205,7 @@ function renderOnboarding() {
         <p class="small muted">Twój organizm zużywa ok. <b>${t.tdee} kcal</b> dziennie (bez treningów).
         ${p.goal === 'cut' ? 'Na redukcji jesz o 20% mniej – to bezpieczne tempo, ok. 0,3–0,5 kg na tydzień. Dużo białka chroni mięśnie.' : p.goal === 'gain' ? 'Przy budowie mięśni jesz ok. 10% więcej.' : ''}
         Za każdy trening limit kalorii na dany dzień rośnie o połowę spalonych kalorii.</p>
+        ${p.target_weight_kg && PACE[p.goal] ? `<div class="msg info">🎯 Cel: ${f1(p.target_weight_kg)} kg (${p.goal === 'cut' ? '−' : '+'}${f1(Math.abs(p.weight_kg - p.target_weight_kg))} kg). ${forecastText(p, todayStr(), p.weight_kg)}</div>` : ''}
         <p class="small muted">To wartości orientacyjne. Jeśli masz choroby przewlekłe, jesteś w ciąży lub karmisz – skonsultuj cele z lekarzem lub dietetykiem.</p>
         <button class="btn primary big" data-k="save">Zaczynamy!</button>
         <button class="btn" data-k="back">Wstecz</button>
@@ -201,6 +220,12 @@ function renderOnboarding() {
     if (b.dataset.k === 'save') {
       b.disabled = true;
       try {
+        const old = S.profile || {};
+        // nowy plan zaczyna się przy pierwszym starcie albo zmianie celu (zmiana samej wagi docelowej zachowuje start)
+        if (!o.edit || !p.plan_start_date || old.goal !== p.goal) {
+          p.plan_start_date = todayStr();
+          p.plan_start_weight = p.weight_kg;
+        }
         S.profile = await db.saveProfile({ ...profileCols(p), ...targetsOnly(computeTargets(p)), targets_manual: false });
         await db.logWeight(todayStr(), p.weight_kg);
       } finally { b.disabled = false; }
@@ -223,7 +248,7 @@ async function renderDay() {
   const d = S.date, isToday = d === todayStr(), el = main();
   if (!$('.day', el)) el.innerHTML = '<div class="loading">Ładowanie…</div>';
   const from = addDays(d, -7);
-  const [E, A] = await Promise.all([db.entriesRange(from, d), db.actsRange(from, d)]);
+  const [E, A, lastW] = await Promise.all([db.entriesRange(from, d), db.actsRange(from, d), isToday ? db.lastWeight() : null]);
   if (S.tab !== 'day' || S.date !== d) return;
 
   const entries = E.filter(e => e.date === d), acts = A.filter(a => a.date === d);
@@ -238,6 +263,12 @@ async function renderDay() {
   const known = new Set(MEALS.map(m => m.id));
   const groups = MEALS.map(m => ({ ...m, items: entries.filter(e => (known.has(e.meal) ? e.meal : 'przekaska') === m.id) })).filter(g => g.items.length);
   const hasWarn = wk.msgs.some(m => m.lvl === 'warn');
+  const sinceW = lastW ? daysBetween(lastW.date, d) : null;
+  const weighCard = isToday && sinceW != null && sinceW >= 7 ? `<section class="card weigh">
+    <h3>⚖️ Minął tydzień – czas na ważenie</h3>
+    <p class="small muted">Ostatnio: ${f1(lastW.weight_kg)} kg, ${sinceW} dni temu. Waż się rano, na czczo, po toalecie. Po zapisaniu zobaczysz ocenę tygodnia.</p>
+    <div class="row-input"><input id="day-w" inputmode="decimal" placeholder="${f1(lastW.weight_kg)}" aria-label="Dzisiejsza waga w kg"><span>kg</span><button class="btn primary" data-act="weighIn" data-src="day-w">Zapisz</button></div>
+  </section>` : '';
 
   const weekCard = `<section class="card week"><div class="sec-h"><h3>Ostatnie 7 dni</h3><span class="muted small">${isToday ? 'bez dzisiaj' : 'do tego dnia'}</span></div>
     ${wk.msgs.map(m => `<div class="msg ${m.lvl}">${m.lvl === 'warn' ? '⚠️' : m.lvl === 'ok' ? '✅' : 'ℹ️'} ${esc(m.text)}</div>`).join('')}
@@ -264,6 +295,7 @@ async function renderDay() {
     </section>
 
     <div class="btnrow"><button class="btn primary big" data-act="addMeal">📷 Dodaj posiłek</button><button class="btn big" data-act="addAct">🏃 Aktywność</button></div>
+    ${weighCard}
     ${hasWarn ? weekCard : ''}
 
     ${groups.length ? groups.map(g => `<section class="card"><div class="sec-h"><h3>${g.label}</h3><span class="muted">${r0(sum(g.items).kcal)} kcal</span></div>
@@ -415,9 +447,9 @@ async function renderProfile() {
       <p class="small muted">${p.targets_manual ? 'Ustawione ręcznie.' : 'Wyliczone automatycznie.'} Zapotrzebowanie bez treningów ≈ ${t.tdee} kcal${p.goal === 'cut' ? ', cel −20%' : p.goal === 'gain' ? ', cel +10%' : ''}. Aktywność dodaje do limitu połowę spalonych kalorii.</p>
       <button class="btn" data-act="editTargets">Dostosuj ręcznie</button></section>
 
-    <section class="card"><h3>Waga</h3>
-      <div class="row-input"><input id="pf-w" inputmode="decimal" value="${f1(p.weight_kg)}" aria-label="Waga w kg"><span>kg</span><button class="btn" data-act="saveWeight">Zapisz</button></div>
-      <div id="w-hist" class="small muted"></div></section>
+    <section class="card"><h3>Waga i cel</h3>
+      <p>Aktualna waga: <b>${f1(p.weight_kg)} kg</b>${p.target_weight_kg ? ` · cel: <b>${f1(p.target_weight_kg)} kg</b>` : ''}</p>
+      <button class="btn" data-act="goProgress">Ważenie i postępy →</button></section>
 
     <section class="card"><h3>Moje dane i cel</h3>
       <p>${p.sex === 'f' ? 'Kobieta' : 'Mężczyzna'}, ${p.age} lat, ${f1(p.height_cm)} cm<br>Tryb życia: ${esc(life?.label || '')}<br>Cel: <b>${esc(goal?.label || '')}</b></p>
@@ -434,11 +466,44 @@ async function renderProfile() {
 
     <section class="card"><h3>Konto</h3><p class="small muted">Zalogowano jako ${esc(S.session.user.email)}</p>
       <button class="btn" data-act="logout">Wyloguj</button></section>
-    <p class="small muted center">Forma · wersja 1.0</p>`;
+    <p class="small muted center">Forma · wersja 1.1</p>`;
+}
 
-  const hist = await db.weightHistory().catch(() => []);
-  const h = $('#w-hist');
-  if (h && hist.length > 1) h.innerHTML = 'Ostatnie pomiary: ' + hist.map(x => `${fmtShort(x.date)}: <b>${f1(x.weight_kg)}</b>`).join(' · ');
+/* ---------- Waga i cel ---------- */
+async function saveWeight(kg) {
+  const p = S.profile;
+  const patch = { weight_kg: kg };
+  if (!p.targets_manual) Object.assign(patch, targetsOnly(computeTargets({ ...p, weight_kg: kg })));
+  if (!p.plan_start_date) Object.assign(patch, { plan_start_date: todayStr(), plan_start_weight: kg });
+  await db.logWeight(todayStr(), kg);
+  S.profile = await db.saveProfile({ ...profileCols(p), ...patch });
+}
+
+function openGoalWeight() {
+  const p = S.profile;
+  if (!PACE[p.goal]) {
+    toast('Przy celu „Utrzymanie wagi” nie ustawiamy wagi docelowej. Zmień cel w Profilu.', 'err');
+    return;
+  }
+  const sh = openSheet(`<h2>Cel wagowy</h2>${goalWeightFields(p)}
+    <button class="btn primary" data-k="save">Zapisz</button>
+    ${p.target_weight_kg ? '<button class="btn danger" data-k="clear">Usuń cel</button>' : ''}`);
+  bindGoalWeight(sh, () => p);
+  sh.onclick = safe(async e => {
+    const b = e.target.closest('button[data-k]');
+    if (!b) return;
+    let tv = null;
+    if (b.dataset.k === 'save') {
+      const [v, err] = validateTarget(p, $('[data-g=target]', sh).value);
+      if (err) return toast(err, 'err');
+      if (!v) return toast('Wpisz, ile kg, albo wagę docelową', 'err');
+      tv = v;
+    }
+    const patch = { target_weight_kg: tv };
+    if (!p.plan_start_date) Object.assign(patch, { plan_start_date: todayStr(), plan_start_weight: p.weight_kg });
+    S.profile = await db.saveProfile({ ...profileCols(p), ...patch });
+    closeSheet(); toast('Zapisano ✔'); go('progress', true);
+  });
 }
 
 function openTargets() {
@@ -479,16 +544,26 @@ const ACT = {
   calDay: t => { S.date = t.dataset.date; go('day'); },
   editTargets: () => openTargets(),
   editProfile: () => { S.onb = { step: 1, edit: true, p: { ...S.profile } }; setTabbar(false); renderOnboarding(); },
-  saveWeight: async () => {
-    const kg = r1(num($('#pf-w').value));
-    if (kg < 35 || kg > 300) return toast('Podaj wagę w kg', 'err');
+  goProgress: () => go('progress'),
+  weighIn: async t => {
+    const kg = r1(num($('#' + t.dataset.src).value));
+    if (kg < 35 || kg > 300) return toast('Podaj wagę w kg, np. 64,5', 'err');
+    t.disabled = true;
+    try { await saveWeight(kg); } finally { t.disabled = false; }
+    toast('Zapisano ✔ Oto ocena tygodnia.');
+    go('progress');
+  },
+  delWeight: async t => {
+    if (!confirm('Usunąć ten pomiar wagi?')) return;
+    await db.deleteWeight(t.dataset.date);
+    toast('Usunięto'); go('progress', true);
+  },
+  editGoalWeight: () => openGoalWeight(),
+  restartPlan: async () => {
     const p = S.profile;
-    const patch = { weight_kg: kg };
-    if (!p.targets_manual) Object.assign(patch, targetsOnly(computeTargets({ ...p, weight_kg: kg })));
-    S.profile = await db.saveProfile({ ...profileCols(p), ...patch });
-    await db.logWeight(todayStr(), kg);
-    toast(p.targets_manual ? 'Zapisano ✔' : 'Zapisano ✔ Cele przeliczone.');
-    go('profile');
+    if (!confirm(`Zacząć plan od nowa od dziś, z wagą ${f1(p.weight_kg)} kg? Pomiary zostaną, zmieni się tylko punkt startu.`)) return;
+    S.profile = await db.saveProfile({ ...profileCols(p), plan_start_date: todayStr(), plan_start_weight: p.weight_kg });
+    toast('Nowy start ustawiony ✔'); go('progress');
   },
   saveGemini: () => {
     setKey($('#pf-key').value);

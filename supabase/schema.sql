@@ -22,6 +22,12 @@ create table if not exists public.profiles (
   updated_at     timestamptz default now()
 );
 
+-- Plan: waga docelowa i punkt startu (dodane w aktualizacji 1)
+alter table public.profiles
+  add column if not exists target_weight_kg  numeric,
+  add column if not exists plan_start_date   date,
+  add column if not exists plan_start_weight numeric;
+
 -- Moja baza posiłków i produktów
 create table if not exists public.foods (
   id           uuid primary key default gen_random_uuid(),
