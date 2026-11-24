@@ -170,6 +170,18 @@ export function chart(p, start, weights, today) {
   const grid = [];
   const stepV = hi - lo > 8 ? 2 : 1;
   for (let v = lo; v <= hi; v += stepV) grid.push(`<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--border)" stroke-width="1"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${v}</text>`);
+  // oś X: drobne kreski co dzień (lub co tydzień przy długim planie), podpisy co kilka dni / tygodni
+  const minor = span <= 42 ? 1 : 7;
+  const major = [1, 2, 7, 14, 28, 56, 91].find(s => span / s <= 5) || 182;
+  const axisY = H - B;
+  for (let dd = 0; dd <= span; dd += minor) {
+    const xx = x(addDays(start, dd)).toFixed(1), isMajor = dd % major === 0;
+    grid.push(`<line x1="${xx}" x2="${xx}" y1="${axisY}" y2="${axisY + (isMajor ? 5 : 3)}" stroke="var(--muted)" stroke-width="1"/>`);
+    if (isMajor) {
+      grid.push(`<line x1="${xx}" x2="${xx}" y1="${T}" y2="${axisY}" stroke="var(--border)" stroke-width="1" opacity=".6"/>`);
+      if (x(addDays(start, dd)) < W - R - 18) grid.push(`<text x="${xx}" y="${H - 4}" text-anchor="${dd ? 'middle' : 'start'}" font-size="10" fill="var(--muted)">${esc(fmtShort(addDays(start, dd)))}</text>`);
+    }
+  }
   const pts = ws.map(w => [x(w.date), y(+w.weight_kg)]);
   return `<svg viewBox="0 0 ${W} ${H}" class="wchart" role="img" aria-label="Wykres wagi">
     ${grid.join('')}${corridor}
@@ -178,8 +190,6 @@ export function chart(p, start, weights, today) {
     <line x1="${x(today)}" x2="${x(today)}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-dasharray="2 4" stroke-width="1"/>
     ${pts.length > 1 ? `<polyline points="${pts.map(q => q.join(',')).join(' ')}" fill="none" stroke="var(--info)" stroke-width="2" stroke-linejoin="round"/>` : ''}
     ${pts.map(([a, b]) => `<circle cx="${a}" cy="${b}" r="3.5" fill="var(--info)"/>`).join('')}
-    <text x="${L}" y="${H - 6}" font-size="11" fill="var(--muted)">${esc(fmtShort(start))}</text>
-    <text x="${W - R}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--muted)">${esc(fmtShort(endDate))}</text>
   </svg>
   <div class="legend"><span><i class="wl"></i>Twoja waga</span>${pace ? '<span><i class="ok"></i>bezpieczne tempo</span>' : ''}${tgt ? '<span><i class="tl"></i>cel</span>' : ''}</div>`;
 }

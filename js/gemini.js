@@ -4,6 +4,9 @@
 const LS_KEY = 'forma.geminiKey';
 const LS_MODEL = 'forma.geminiModel';
 export const DEFAULT_MODEL = 'gemini-flash-latest';
+// Zapasowe modele, gdy główny jest przeciążony
+const FALLBACK_MODELS = ['gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } }
 function lsSet(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch { /* prywatny tryb */ } }
@@ -89,29 +92,42 @@ W polu note napisz krótko po polsku, czego nie jesteś pewien (np. "nie widać,
   const parts = [{ text: prompt }];
   if (imageBlob) parts.push({ inline_data: { mime_type: 'image/jpeg', data: await blobToBase64(imageBlob) } });
 
-  let res;
-  try {
-    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
-      }),
-    });
-  } catch {
-    throw new Error('Brak połączenia z Gemini. Sprawdź internet.');
+  const body = JSON.stringify({
+    contents: [{ role: 'user', parts }],
+    generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
+  });
+  const call = m => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body,
+  });
+
+  // Gdy serwer jest przeciążony (5xx) albo model wyczerpał limit (429):
+  // ponów raz po chwili, potem spróbuj zapasowych modeli.
+  const models = [model, ...FALLBACK_MODELS.filter(m => m !== model)];
+  let res, last = null;
+  for (let i = 0; i < models.length; i++) {
+    const m = models[i];
+    for (let attempt = 0; attempt < (i === 0 ? 2 : 1); attempt++) {
+      if (attempt) await sleep(2000);
+      try { res = await call(m); } catch { throw new Error('Brak połączenia z Gemini. Sprawdź internet.'); }
+      if (res.ok) break;
+      if (res.status < 500 && res.status !== 429) break;
+    }
+    if (res.ok) break;
+    let msg = '';
+    try { msg = (await res.json())?.error?.message || ''; } catch { /* */ }
+    if (res.status === 400 && /api key/i.test(msg)) throw new Error('Nieprawidłowy klucz Gemini. Sprawdź go w Profilu.');
+    if (res.status === 403) throw new Error('Klucz Gemini nie ma dostępu. Utwórz nowy w Google AI Studio.');
+    if (i === 0 || !last || last.status === 404) last = { status: res.status, msg, model: m };
+    if (res.status === 404 || res.status === 429 || res.status >= 500) continue; // spróbuj następnego modelu
+    break;
   }
 
   if (!res.ok) {
-    let msg = '';
-    try { msg = (await res.json())?.error?.message || ''; } catch { /* */ }
-    if (res.status === 429) throw new Error('Wykorzystany darmowy limit Gemini. Odczekaj minutę albo spróbuj jutro. Możesz też wpisać posiłek ręcznie.');
-    if (res.status === 404) throw new Error(`Model „${model}” jest niedostępny. W Profilu zmień nazwę modelu (np. gemini-2.5-flash).`);
-    if (res.status === 400 && /api key/i.test(msg)) throw new Error('Nieprawidłowy klucz Gemini. Sprawdź go w Profilu.');
-    if (res.status === 403) throw new Error('Klucz Gemini nie ma dostępu. Utwórz nowy w Google AI Studio.');
-    if (res.status >= 500) throw new Error('Serwery Gemini są teraz przeciążone. Spróbuj za chwilę.');
-    throw new Error('Błąd Gemini: ' + (msg || res.status));
+    const { status, msg } = last;
+    if (status === 429) throw new Error('Wykorzystany darmowy limit Gemini. Odczekaj minutę albo spróbuj jutro. Możesz też wpisać posiłek ręcznie.');
+    if (status === 404) throw new Error(`Model „${model}” jest niedostępny. W Profilu zmień nazwę modelu (np. ${DEFAULT_MODEL}).`);
+    if (status >= 500) throw new Error('Serwery Gemini są teraz przeciążone (sprawdzono kilka modeli). Spróbuj za kilka minut albo wpisz posiłek ręcznie.');
+    throw new Error('Błąd Gemini: ' + (msg || status));
   }
 
   const data = await res.json();
